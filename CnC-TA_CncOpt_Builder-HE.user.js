@@ -5,8 +5,8 @@
 // @description  Vergleicht eine Basis mit einem CnCTAOpt-Link, verschiebt vorhandene Gebäude und prüft anschließend die tatsächliche Aufstellung.
 // @author       Harzi
 // @match        https://*.alliances.commandandconquer.com/*/index.aspx*
-// @downloadURL  https://raw.githubusercontent.com/Harzi66/CnC-TA_CncOpt-Builder-HE/main/CnC-TA_CncOpt_Builder-HE.user.js
-// @updateURL    https://raw.githubusercontent.com/Harzi66/CnC-TA_CncOpt-Builder-HE/main/CnC-TA_CncOpt_Builder-HE.user.js
+// @downloadURL  https://raw.githubusercontent.com/Harzi66/CnC-TA_CncOpt_Builder-HE/main/CnC-TA_CncOpt_Builder-HE.user.js
+// @updateURL    https://raw.githubusercontent.com/Harzi66/CnC-TA_CncOpt_Builder-HE/main/CnC-TA_CncOpt_Builder-HE.user.js
 // @grant        none
 // ==/UserScript==
 
