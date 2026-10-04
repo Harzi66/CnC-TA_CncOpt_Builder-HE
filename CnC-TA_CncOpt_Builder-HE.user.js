@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CnC-TA_CncOpt_Builder-HE
 // @namespace    Harzi
-// @version      0.3.10
+// @version      0.3.11
 // @description  Vergleicht eine Basis mit einem CnCTAOpt-Link, verschiebt vorhandene Gebäude und prüft anschließend die tatsächliche Aufstellung.
 // @author       Harzi
 // @match        https://*.alliances.commandandconquer.com/*/index.aspx*
@@ -9,6 +9,9 @@
 // @updateURL    https://raw.githubusercontent.com/Harzi66/CnC-TA_CncOpt_Builder-HE/main/CnC-TA_CncOpt_Builder-HE.user.js
 // @grant        none
 // ==/UserScript==
+
+// Neu in Version 0.3.11
+// - Anpassung Undo Logick für Firefox
 
 (function () {
     "use strict";
@@ -1446,6 +1449,11 @@
         localStorage.harziCncOptOriginalLayouts =
             JSON.stringify(layouts);
 
+        console.log(
+    "[CnCOpt DEBUG] Undo-Speicher:",
+    localStorage.harziCncOptOriginalLayouts
+);
+
         if (UNDO_BUTTON) {
             UNDO_BUTTON.setEnabled(true);
         }
@@ -1711,7 +1719,7 @@
         );
 
         PROGRESS_BAR.set({
-            width: 135,
+            width: 170,
             height: 22,
             backgroundColor: "#202020"
         });
@@ -1807,11 +1815,12 @@
             top: 225
         });
 
-        APPLY_BUTTON.setEnabled(false);
         APPLY_BUTTON.addListener(
-            "execute",
-            applyAnalysis
-        );
+    "execute",
+    function () {
+        applyAnalysis(false);
+    }
+);
 
         // ============================================================
         // Undo / Rückgängig
@@ -1847,7 +1856,7 @@
             );
 
         closeButton.set({
-            width: 100,
+            width: 115,
             height: 28
         });
 
