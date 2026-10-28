@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CnC-TA_CncOpt_Builder-HE
 // @namespace    Harzi
-// @version      0.3.12
+// @version      0.3.17
 // @description  Vergleicht eine Basis mit einem CnCTAOpt-Link, verschiebt vorhandene Gebäude und prüft anschließend die tatsächliche Aufstellung.
 // @author       Harzi
 // @match        https://*.alliances.commandandconquer.com/*/index.aspx*
@@ -9,6 +9,13 @@
 // @updateURL    https://raw.githubusercontent.com/Harzi66/CnC-TA_CncOpt_Builder-HE/main/CnC-TA_CncOpt_Builder-HE.user.js
 // @grant        none
 // ==/UserScript==
+
+// Neu in Version 0.3.17
+// - Builder-Fenster wird auf dem Desktop außerhalb links neben MainOverlay positioniert
+// - Position wird bei Browser-Resize anhand aktueller Overlay-Bounds neu berechnet
+// - Schnelle Positionsprüfung wie im Building Off-Saver (100-ms-Polling statt fester 1-s-Wartezeit)
+// - Bewegungsbestätigung mit 2,5-s-Sicherheitslimit
+// - CnCOpt-Button in die obere Hauptleiste verschoben, vor "Berichte"
 
 // Neu in Version 0.3.11
 // - Anpassung Undo Logick für Firefox
@@ -818,6 +825,41 @@
          */
         var triedTemporaryCoordinates = {};
 
+        /*
+         * Gemeinsame Bewegungstechnik wie im Building Off-Saver:
+         * Nach MoveBuilding wird der tatsächliche ClientLib-Zustand alle
+         * 100 ms geprüft. Sobald die Zielposition sichtbar ist, geht es
+         * direkt weiter. Nach 2,5 Sekunden wird aus Sicherheitsgründen
+         * beendet bzw. beim TEMP-Move ein anderer Parkplatz versucht.
+         */
+        function waitForBuildingPosition(buildingId, targetX, targetY, callback) {
+            var startedAt = Date.now();
+            var maxWaitMs = 2500;
+            var pollIntervalMs = 100;
+
+            function checkPosition() {
+                var building = findRuntimeBuilding(buildingId);
+
+                if (
+                    building &&
+                    building.get_CoordX() === targetX &&
+                    building.get_CoordY() === targetY
+                ) {
+                    callback(true);
+                    return;
+                }
+
+                if (Date.now() - startedAt >= maxWaitMs) {
+                    callback(false);
+                    return;
+                }
+
+                window.setTimeout(checkPosition, pollIntervalMs);
+            }
+
+            checkPosition();
+        }
+
         function finishSuccess() {
             APPLYING = false;
             updateProgress(
@@ -924,17 +966,35 @@
                             'color: #00ffff; font-weight: bold;'
                         );
 
-                        sendMoveBuilding(
+                        var sentDirect = sendMoveBuilding(
                             findRuntimeBuilding(directMove.building.id),
                             directMove.target.gameX,
                             directMove.target.gameY,
                             'ZIEL'
                         );
-                    }
 
-                    window.setTimeout(function () {
+                        if (!sentDirect) {
+                            failApply('Bewegungsbefehl konnte nicht gesendet werden.');
+                            return;
+                        }
+
+                        waitForBuildingPosition(
+                            directMove.building.id,
+                            directMove.target.gameX,
+                            directMove.target.gameY,
+                            function (confirmed) {
+                                if (!confirmed) {
+                                    log(
+                                        'ZIEL: Position nach 2,5 Sekunden nicht bestätigt. Prüfe den nächsten Schritt anhand des tatsächlichen Zustands.',
+                                        'color: orange; font-weight: bold;'
+                                    );
+                                }
+                                loadStep(step + 1);
+                            }
+                        );
+                    } else {
                         loadStep(step + 1);
-                    }, 1000);
+                    }
 
                     return;
                 }
@@ -994,43 +1054,44 @@
 
                 var tempKey = coordKey(temp.x, temp.y);
 
-                sendMoveBuilding(
+                var sentTemp = sendMoveBuilding(
                     occupantRuntime,
                     temp.x,
                     temp.y,
                     'TEMP'
                 );
 
-                window.setTimeout(function () {
-                    /*
-                     * Nach dem MoveBuilding-Befehl die reale Position prüfen.
-                     * Wurde der Parkplatz vom Server nicht übernommen, wird
-                     * dieser Kandidat verworfen und im nächsten Schritt ein
-                     * anderer freier Parkplatz probiert.
-                     */
-                    var movedRuntime = findRuntimeBuilding(
-                        blocked.occupant.id
-                    );
+                if (!sentTemp) {
+                    triedTemporaryCoordinates[tempKey] = true;
+                    loadStep(step + 1);
+                    return;
+                }
 
-                    if (movedRuntime) {
-                        var actualX = movedRuntime.get_CoordX();
-                        var actualY = movedRuntime.get_CoordY();
-
-                        if (actualX !== temp.x || actualY !== temp.y) {
+                waitForBuildingPosition(
+                    blocked.occupant.id,
+                    temp.x,
+                    temp.y,
+                    function (confirmed) {
+                        /*
+                         * Bei nicht bestätigter Zwischenposition wird dieser
+                         * Parkplatz verworfen. Der nächste Schritt prüft den
+                         * realen Zustand erneut und versucht ggf. einen anderen.
+                         */
+                        if (!confirmed) {
                             triedTemporaryCoordinates[tempKey] = true;
 
                             log(
                                 'TEMP: Position (' +
                                 temp.x + ':' + temp.y +
-                                ') wurde vom Server nicht übernommen. ' +
-                                'Probiere einen anderen Parkplatz.',
+                                ') wurde innerhalb von 2,5 Sekunden nicht bestätigt. ' +
+                                'Probiere ggf. einen anderen Parkplatz.',
                                 'color: orange; font-weight: bold;'
                             );
                         }
-                    }
 
-                    loadStep(step + 1);
-                }, 1000);
+                        loadStep(step + 1);
+                    }
+                );
 
             } catch (e) {
                 console.error(
@@ -1664,10 +1725,13 @@
             return;
         }
 
-        var playArea =
-            qx.core.Init
-                .getApplication()
-                .getPlayArea();
+        var application = qx.core.Init.getApplication();
+        var desktop = application && application.getDesktop();
+
+        if (!desktop) {
+            console.warn("CnCOpt HE: Desktop nicht verfügbar; Fenster kann nicht außerhalb des Basisfensters positioniert werden.");
+            return;
+        }
 
         PANEL =
             new qx.ui.container.Composite();
@@ -1677,26 +1741,80 @@
         );
 
         PANEL.set({
-            width: 420,
+            width: 350,
             height: 345,
             zIndex: 20000
         });
 
-        playArea.add(
-            PANEL,
-            {
-                right: 120,
-                top: 80
+        // Auf dem Desktop statt im PlayArea platzieren. So kann das Fenster
+        // links außerhalb des MainOverlay liegen und überdeckt keine Gebäude.
+        desktop.add(PANEL, { right: 0, top: 105 });
+
+        function positionPanelOutsideOverlay(targetDesktop) {
+            if (!PANEL || !targetDesktop || !targetDesktop.getBounds || !targetDesktop.getChildren) {
+                return false;
             }
-        );
+
+            var desktopBounds = targetDesktop.getBounds();
+            var children = targetDesktop.getChildren() || [];
+            var overlay = children.find(function (child) {
+                return child && child !== PANEL && child.constructor &&
+                    child.constructor.classname === "webfrontend.gui.MainOverlay";
+            });
+            var overlayBounds = overlay && overlay.getBounds && overlay.getBounds();
+
+            if (!desktopBounds || !desktopBounds.width || !overlayBounds || !overlayBounds.width) {
+                console.warn("CnCOpt HE: MainOverlay-Bounds noch nicht verfügbar.");
+                return false;
+            }
+
+            var gap = 12;
+            var rightOffset = Math.max(0, Math.round(desktopBounds.width - overlayBounds.left + gap));
+            PANEL.setLayoutProperties({ right: rightOffset, top: 105 });
+            if (typeof targetDesktop.updateLayout === "function") {
+                targetDesktop.updateLayout();
+            }
+
+            console.info("CnCOpt HE: Fenster links außerhalb des Basisfensters positioniert", {
+                desktopWidth: desktopBounds.width,
+                overlayLeft: overlayBounds.left,
+                overlayWidth: overlayBounds.width,
+                panelWidth: 350,
+                right: rightOffset
+            });
+            return true;
+        }
+
+        // Bounds können erst nach dem Qooxdoo-Layout vollständig verfügbar sein.
+        positionPanelOutsideOverlay(desktop);
+        window.setTimeout(function () {
+            try { positionPanelOutsideOverlay(desktop); }
+            catch (e) { console.warn("CnCOpt HE: Positionierung fehlgeschlagen", e); }
+        }, 250);
+
+        if (!window.__cncOptPanelResizeHandlerInstalled) {
+            window.__cncOptPanelResizeHandlerInstalled = true;
+            window.addEventListener("resize", function () {
+                window.setTimeout(function () {
+                    try {
+                        if (!PANEL || (PANEL.isDisposed && PANEL.isDisposed())) return;
+                        var currentApp = qx.core.Init.getApplication();
+                        var currentDesktop = currentApp && currentApp.getDesktop();
+                        if (currentDesktop) positionPanelOutsideOverlay(currentDesktop);
+                    } catch (e) {
+                        console.warn("CnCOpt HE: Neupositionierung nach Größenänderung fehlgeschlagen", e);
+                    }
+                }, 200);
+            });
+        }
 
         var title =
             new qx.ui.basic.Label(
-                "CnCOpt Builder - V0.3.12"
+                "CnCOpt Builder - V0.3.17"
             );
 
         title.set({
-            width: 400,
+            width: 330,
             height: 24,
             textColor: "#FFFFFF"
         });
@@ -1767,7 +1885,7 @@
             new qx.ui.form.TextArea();
 
         TEXTAREA.set({
-            width: 400,
+            width: 330,
             height: 150,
             placeholder:
                 "CnCTAOpt-Link hier einfügen..."
@@ -1918,95 +2036,113 @@
         return null;
     }
 
+    function findButtonByLabel(widget, label) {
+        if (!widget || !widget.getChildren) {
+            return null;
+        }
+
+        var children = widget.getChildren();
+
+        for (var i = 0; i < children.length; i++) {
+            var child = children[i];
+
+            try {
+                if (child.getLabel && child.getLabel() === label) {
+                    return child;
+                }
+            } catch (e) {}
+
+            var found = findButtonByLabel(child, label);
+            if (found) {
+                return found;
+            }
+        }
+
+        return null;
+    }
+
     function createButton() {
         try {
             if (CNCOPT_BUTTON) {
                 return;
             }
 
-            var playArea =
-                qx.core.Init
-                    .getApplication()
-                    .getPlayArea();
+            var app = qx.core.Init.getApplication();
+            var playArea = app.getPlayArea ? app.getPlayArea() : null;
+            var root = app.getRoot ? app.getRoot() : null;
 
-            var repairButton =
-                findRepairButton(playArea);
+            // Die Hauptnavigation liegt je nach Spielversion außerhalb der
+            // PlayArea. Deshalb zuerst den Qooxdoo-Root durchsuchen und nur
+            // anschließend auf die PlayArea zurückfallen.
+            var reportsButton = findButtonByLabel(root, "Berichte");
+            if (!reportsButton && playArea) {
+                reportsButton = findButtonByLabel(playArea, "Berichte");
+            }
 
-            if (!repairButton) {
+            if (!reportsButton) {
+                log(
+                    "CnCOpt: Hauptmenüpunkt 'Berichte' noch nicht gefunden; erneuter Versuch in 2 Sekunden.",
+                    "color: orange; font-weight: bold;"
+                );
                 window.setTimeout(createButton, 2000);
                 return;
             }
 
-            var parent =
-                repairButton.getLayoutParent();
-
-            if (parent) {
-                parent =
-                    parent.getLayoutParent();
-            }
+            var parent = reportsButton.getLayoutParent();
 
             if (!parent) {
                 window.setTimeout(createButton, 2000);
                 return;
             }
 
-            CNCOPT_BUTTON =
-                new qx.ui.form.Button(
-                    "CncOpt"
-                );
+            CNCOPT_BUTTON = new qx.ui.form.Button("CncOpt");
 
-            CNCOPT_BUTTON.set({
-                width: 100,
-                height: 40,
+            var buttonSettings = {
+                width: 70,
+                height: 28,
                 appearance: "button-text-small"
-            });
+            };
 
-            parent.add(
-                CNCOPT_BUTTON,
-                {
-                    right: 105,
-                    top: 105
+            try {
+                if (reportsButton.getAppearance) {
+                    buttonSettings.appearance = reportsButton.getAppearance();
                 }
-            );
+            } catch (e) {}
 
-            CNCOPT_BUTTON.addListener(
-                "execute",
-                openPanel
-            );
+            CNCOPT_BUTTON.set(buttonSettings);
 
-            // ========================================================
-            // Sichtbarkeit nach Spielmodus
-            // Wie im funktionierenden Building & Off-Saver.
-            // ========================================================
-            BUILDING_MODE_TIMER =
-                window.setInterval(function () {
-                    try {
-                        var currentMode =
-                            ClientLib.Vis.VisMain
-                                .GetInstance()
-                                .get_Mode();
+            if (typeof parent.addBefore === "function") {
+                parent.addBefore(CNCOPT_BUTTON, reportsButton);
+            } else {
+                // Fallback für Layout-Container ohne addBefore-Unterstützung.
+                parent.add(CNCOPT_BUTTON, { begin: 0 });
+            }
 
-                        if (currentMode === 1) {
-                            // Gebäudemodus
-                            CNCOPT_BUTTON.show();
-                        } else {
-                            // Gebäudeansicht verlassen:
-                            // geöffnete CncOpt-Anzeige schließen
-                            // und den Button ausblenden.
-                            if (PANEL) {
-                                closePanel();
-                            }
+            CNCOPT_BUTTON.addListener("execute", openPanel);
 
-                            CNCOPT_BUTTON.exclude();
+            // Sichtbarkeit nach Spielmodus bleibt wie zuvor.
+            BUILDING_MODE_TIMER = window.setInterval(function () {
+                try {
+                    var currentMode =
+                        ClientLib.Vis.VisMain
+                            .GetInstance()
+                            .get_Mode();
+
+                    if (currentMode === 1) {
+                        CNCOPT_BUTTON.show();
+                    } else {
+                        if (PANEL) {
+                            closePanel();
                         }
-                    } catch (e) {}
-                }, 500);
+                        CNCOPT_BUTTON.exclude();
+                    }
+                } catch (e) {}
+            }, 500);
 
             log(
-                "CnCOpt Builder V0.3.9 geladen.",
+                "CnCOpt Builder V0.3.16 geladen – Fenster links neben der Basis; Button vor Berichte.",
                 "color: lime; font-weight: bold;"
             );
-
         } catch (e) {
             window.setTimeout(createButton, 2000);
         }
